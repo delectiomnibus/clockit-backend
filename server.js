@@ -39,7 +39,7 @@ const db = new sqlite3.Database(':memory:', (err) => {
             } else {
                 // Pre-populate the users table with existing users
                 db.run('INSERT INTO users (username, password, role, employee_id) VALUES (?, ?, ?, ?)',
-                    ['admin', '$2b$10$0tYhWaizJ40HXM2S0YARSuFa4HI50r6dHLp9EXyjT1iCWWzKaKaCu', 'Admin', 'admin1'],
+                    ['admin', '$2b$10$d/lxPN7WMod7Gna3d71N1eWmw2PZ2o9qDRzX2GyZ4.598iW7v8Iuu', 'Admin', 'admin1'],
                     (err) => {
                         if (err) {
                             console.error('Error inserting admin user:', err.message);
@@ -47,10 +47,10 @@ const db = new sqlite3.Database(':memory:', (err) => {
                     }
                 );
                 db.run('INSERT INTO users (username, password, role, employee_id) VALUES (?, ?, ?, ?)',
-                    ['employee1', '$2b$10$zX8g0kL5zX8g0kL5zX8g0uFa4HI50r6dHLp9EXyjT1iCWWzKaKaCu', 'Employee', 'emp1'],
+                    ['Andrew', '$2b$10$VJGkcQ8owYvgiIsZ1iRuiuld/yiSUPtGD0zZeda3M6P1YNdR9DZki', 'Employee', 'andrew1'],
                     (err) => {
                         if (err) {
-                            console.error('Error inserting employee1 user:', err.message);
+                            console.error('Error inserting Andrew user:', err.message);
                         }
                     }
                 );
