@@ -6,18 +6,18 @@ const cookieParser = require('cookie-parser');
 const app = express();
 
 // Initialize SQLite database
-const db = new sqlite3.Database('./clockit.db', (err) => {
+const db = new sqlite3.Database(':memory:', (err) => {
     if (err) {
         console.error('Error opening database:', err.message);
     } else {
-        console.log('Connected to the SQLite database.');
+        console.log('Connected to the in-memory SQLite database.');
         // Create employees table
-        db.run(`CREATE TABLE IF NOT EXISTS employees (
+        db.run(`CREATE TABLE employees (
             employee_id TEXT PRIMARY KEY,
             name TEXT NOT NULL
         )`);
         // Create punches table with notes and updated_by columns
-        db.run(`CREATE TABLE IF NOT EXISTS punches (
+        db.run(`CREATE TABLE punches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             employee_id TEXT,
             type TEXT NOT NULL,
@@ -27,13 +27,35 @@ const db = new sqlite3.Database('./clockit.db', (err) => {
             FOREIGN KEY (employee_id) REFERENCES employees(employee_id)
         )`);
         // Create users table
-        db.run(`CREATE TABLE IF NOT EXISTS users (
+        db.run(`CREATE TABLE users (
             username TEXT PRIMARY KEY,
             password TEXT NOT NULL,
             role TEXT NOT NULL CHECK(role IN ('Admin', 'Employee')),
             employee_id TEXT,
             FOREIGN KEY (employee_id) REFERENCES employees(employee_id)
-        )`);
+        )`, (err) => {
+            if (err) {
+                console.error('Error creating tables:', err.message);
+            } else {
+                // Pre-populate the users table with existing users
+                db.run('INSERT INTO users (username, password, role, employee_id) VALUES (?, ?, ?, ?)',
+                    ['admin', '$2b$10$0tYhWaizJ40HXM2S0YARSuFa4HI50r6dHLp9EXyjT1iCWWzKaKaCu', 'Admin', 'admin1'],
+                    (err) => {
+                        if (err) {
+                            console.error('Error inserting admin user:', err.message);
+                        }
+                    }
+                );
+                db.run('INSERT INTO users (username, password, role, employee_id) VALUES (?, ?, ?, ?)',
+                    ['employee1', '$2b$10$zX8g0kL5zX8g0kL5zX8g0uFa4HI50r6dHLp9EXyjT1iCWWzKaKaCu', 'Employee', 'emp1'],
+                    (err) => {
+                        if (err) {
+                            console.error('Error inserting employee1 user:', err.message);
+                        }
+                    }
+                );
+            }
+        });
     }
 });
 
