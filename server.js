@@ -6,14 +6,14 @@ const cookieParser = require('cookie-parser');
 const cors = require('cors'); // Added CORS package
 
 const app = express();
-
+app.use(cors()); // Temporarily allow all origins
 // Add CORS middleware to allow requests from Vercel frontend domains
-app.use(cors({
-    origin: [
-        'https://clockit-frontend-7hr9qe9kk-delectiomnibus-projects.vercel.app', // Preview URL
-        'https://clockit-frontend.vercel.app' // Production URL
-    ]
-}));
+//app.use(cors({
+//    origin: [
+//        'https://clockit-frontend-7hr9qe9kk-delectiomnibus-projects.vercel.app', // Preview URL
+//        'https://clockit-frontend.vercel.app' // Production URL
+//    ]
+//}));
 
 // Initialize SQLite database
 const db = new sqlite3.Database(':memory:', (err) => {
