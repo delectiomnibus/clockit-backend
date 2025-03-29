@@ -3,7 +3,17 @@ const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcrypt');
 const session = require('express-session');
 const cookieParser = require('cookie-parser');
+const cors = require('cors'); // Added CORS package
+
 const app = express();
+
+// Add CORS middleware to allow requests from Vercel frontend domains
+app.use(cors({
+    origin: [
+        'https://clockit-frontend-7hr9qe9kk-delectiomnibus-projects.vercel.app', // Preview URL
+        'https://clockit-frontend.vercel.app' // Production URL
+    ]
+}));
 
 // Initialize SQLite database
 const db = new sqlite3.Database(':memory:', (err) => {
@@ -536,7 +546,6 @@ app.get('/timecard/:employee_id', isAuthenticated, (req, res) => {
             if (err) {
                 console.error(err);
                 res.status(500).json({ error: 'Failed to fetch punches' });
-                return;
             }
             res.json({ employee, punches });
         });
