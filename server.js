@@ -8,8 +8,10 @@ const cors = require('cors');
 
 const app = express();
 app.use(cors({
-    origin: ['http://localhost:8080', 'http://127.0.0.1:8080', 'https://clockit-frontend.vercel.app'], // Replace with your actual frontend URL
-    credentials: true
+    origin: ['http://localhost:8080', 'http://127.0.0.1:8080', 'https://clockit-frontend.vercel.app'],
+    credentials: true,
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type']
 }));
 
 // Initialize PostgreSQL connection pool
