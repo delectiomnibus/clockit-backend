@@ -1,71 +1,93 @@
+require('dotenv').config();
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
+const { Pool } = require('pg'); // Use pg for PostgreSQL
 const bcrypt = require('bcrypt');
 const session = require('express-session');
 const cookieParser = require('cookie-parser');
-const cors = require('cors'); // Added CORS package
+const cors = require('cors');
 
 const app = express();
-app.use(cors()); // Temporarily allow all origins
-// Add CORS middleware to allow requests from Vercel frontend domains
-//app.use(cors({
-//    origin: [
-//        'https://clockit-frontend-7hr9qe9kk-delectiomnibus-projects.vercel.app', // Preview URL
-//        'https://clockit-frontend.vercel.app' // Production URL
-//    ]
-//}));
+app.use(cors({
+    origin: ['http://localhost:8080', 'http://127.0.0.1:8080', 'https://clockit-frontend.vercel.app'], // Replace with your actual frontend URL
+    credentials: true
+}));
 
-// Initialize SQLite database
-const db = new sqlite3.Database(':memory:', (err) => {
+// Initialize PostgreSQL connection pool
+const pool = new Pool({
+    connectionString: process.env.POSTGRES_URL, // Use the Vercel-provided POSTGRES_URL
+    ssl: {
+        rejectUnauthorized: false // Required for Neon Postgres with sslmode=require
+    }
+});
+
+// Test the database connection
+pool.connect(async (err) => {
     if (err) {
-        console.error('Error opening database:', err.message);
+        console.error('Error connecting to PostgreSQL:', err.message);
     } else {
-        console.log('Connected to the in-memory SQLite database.');
-        // Create employees table
-        db.run(`CREATE TABLE employees (
-            employee_id TEXT PRIMARY KEY,
-            name TEXT NOT NULL
-        )`);
-        // Create punches table with notes and updated_by columns
-        db.run(`CREATE TABLE punches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_id TEXT,
-            type TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            updated_by TEXT,
-            notes TEXT,
-            FOREIGN KEY (employee_id) REFERENCES employees(employee_id)
-        )`);
-        // Create users table
-        db.run(`CREATE TABLE users (
-            username TEXT PRIMARY KEY,
-            password TEXT NOT NULL,
-            role TEXT NOT NULL CHECK(role IN ('Admin', 'Employee')),
-            employee_id TEXT,
-            FOREIGN KEY (employee_id) REFERENCES employees(employee_id)
-        )`, (err) => {
-            if (err) {
-                console.error('Error creating tables:', err.message);
-            } else {
-                // Pre-populate the users table with existing users
-                db.run('INSERT INTO users (username, password, role, employee_id) VALUES (?, ?, ?, ?)',
-                    ['admin', '$2b$10$d/lxPN7WMod7Gna3d71N1eWmw2PZ2o9qDRzX2GyZ4.598iW7v8Iuu', 'Admin', 'admin1'],
-                    (err) => {
-                        if (err) {
-                            console.error('Error inserting admin user:', err.message);
-                        }
-                    }
+        console.log('Connected to PostgreSQL database.');
+        try {
+            // Drop tables (in reverse order due to foreign key dependencies)
+            await pool.query('DROP TABLE IF EXISTS punches');
+            await pool.query('DROP TABLE IF EXISTS users');
+            await pool.query('DROP TABLE IF EXISTS employees');
+
+            // Create tables
+            await pool.query(`
+                CREATE TABLE employees (
+                    employee_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL
                 );
-                db.run('INSERT INTO users (username, password, role, employee_id) VALUES (?, ?, ?, ?)',
-                    ['Andrew', '$2b$10$VJGkcQ8owYvgiIsZ1iRuiuld/yiSUPtGD0zZeda3M6P1YNdR9DZki', 'Employee', 'andrew1'],
-                    (err) => {
-                        if (err) {
-                            console.error('Error inserting Andrew user:', err.message);
-                        }
-                    }
+            `);
+            await pool.query(`
+                CREATE TABLE punches (
+                    id SERIAL PRIMARY KEY,
+                    employee_id TEXT,
+                    type TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    updated_by TEXT,
+                    notes TEXT,
+                    FOREIGN KEY (employee_id) REFERENCES employees(employee_id)
                 );
-            }
-        });
+            `);
+            await pool.query(`
+                CREATE TABLE users (
+                    username TEXT PRIMARY KEY,
+                    password TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('Admin', 'Employee')),
+                    employee_id TEXT,
+                    FOREIGN KEY (employee_id) REFERENCES employees(employee_id)
+                );
+            `);
+
+            // Insert employees
+            await pool.query(
+                'INSERT INTO employees (employee_id, name) VALUES ($1, $2) ON CONFLICT (employee_id) DO NOTHING',
+                ['admin1', 'Admin User']
+            );
+            await pool.query(
+                'INSERT INTO employees (employee_id, name) VALUES ($1, $2) ON CONFLICT (employee_id) DO NOTHING',
+                ['andrew1', 'Andrew']
+            );
+
+            // Generate fresh password hashes
+            const adminPassword = await bcrypt.hash('admin', 10);
+            const andrewPassword = await bcrypt.hash('andrew', 10);
+
+            // Insert users with fresh hashes
+            await pool.query(
+                'INSERT INTO users (username, password, role, employee_id) VALUES ($1, $2, $3, $4) ON CONFLICT (username) DO UPDATE SET password = $2, role = $3, employee_id = $4',
+                ['admin', adminPassword, 'Admin', 'admin1']
+            );
+            await pool.query(
+                'INSERT INTO users (username, password, role, employee_id) VALUES ($1, $2, $3, $4) ON CONFLICT (username) DO UPDATE SET password = $2, role = $3, employee_id = $4',
+                ['Andrew', andrewPassword, 'Employee', 'andrew1']
+            );
+
+            console.log('Tables created and data pre-populated successfully.');
+        } catch (err) {
+            console.error('Error setting up database:', err.message);
+        }
     }
 });
 
@@ -102,23 +124,32 @@ app.post('/login', async (req, res) => {
         return res.status(400).json({ error: 'Username and password are required.' });
     }
 
-    db.get('SELECT * FROM users WHERE username = ?', [username], async (err, user) => {
-        if (err) {
-            console.error(err);
-            return res.status(500).json({ error: 'Database error.' });
-        }
+    try {
+        console.log(`Login attempt for username: ${username}`);
+        const { rows } = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+        const user = rows[0];
         if (!user) {
+            console.log(`User not found: ${username}`);
             return res.status(401).json({ error: 'Invalid username or password.' });
         }
 
+        console.log(`User found: ${JSON.stringify(user)}`);
+        console.log(`Comparing password: ${password} against hash: ${user.password}`);
         const match = await bcrypt.compare(password, user.password);
+        console.log(`Password match result: ${match}`);
+
         if (!match) {
+            console.log('Password comparison failed.');
             return res.status(401).json({ error: 'Invalid username or password.' });
         }
 
         req.session.user = { username: user.username, role: user.role, employee_id: user.employee_id };
+        console.log('Login successful, setting session.');
         res.json({ message: 'Login successful.', role: user.role });
-    });
+    } catch (err) {
+        console.error('Error during login:', err);
+        res.status(500).json({ error: 'Database error.' });
+    }
 });
 
 // Logout endpoint
@@ -134,9 +165,13 @@ app.post('/logout', (req, res) => {
 
 // Get current user (for frontend to check login status)
 app.get('/current-user', (req, res) => {
+    console.log('Received /current-user request');
+    console.log('Session data:', req.session);
     if (req.session.user) {
+        console.log('User is logged in:', req.session.user);
         res.json({ loggedIn: true, username: req.session.user.username, role: req.session.user.role, employee_id: req.session.user.employee_id });
     } else {
+        console.log('No user in session, user is not logged in');
         res.json({ loggedIn: false });
     }
 });
@@ -151,117 +186,104 @@ app.post('/register', async (req, res) => {
         return res.status(400).json({ error: 'Role must be Admin or Employee.' });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-    db.run('INSERT INTO users (username, password, role, employee_id) VALUES (?, ?, ?, ?)',
-        [username, hashedPassword, role, employee_id || null],
-        function (err) {
-            if (err) {
-                console.error(err);
-                return res.status(500).json({ error: 'Failed to register user.' });
-            }
-            res.json({ message: 'User registered successfully.' });
-        }
-    );
+    try {
+        const hashedPassword = await bcrypt.hash(password, 10);
+        await pool.query(
+            'INSERT INTO users (username, password, role, employee_id) VALUES ($1, $2, $3, $4)',
+            [username, hashedPassword, role, employee_id || null]
+        );
+        res.json({ message: 'User registered successfully.' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to register user.' });
+    }
 });
 
 // Protect existing endpoints with authentication
-app.get('/employees', isAuthenticated, isAdmin, (req, res) => {
-    db.all('SELECT * FROM employees', [], (err, rows) => {
-        if (err) {
-            console.error(err);
-            res.status(500).json({ error: 'Failed to fetch employees' });
-            return;
-        }
+app.get('/employees', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const { rows } = await pool.query('SELECT * FROM employees');
         res.json({ employees: rows });
-    });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to fetch employees' });
+    }
 });
 
-app.post('/employees', isAuthenticated, isAdmin, (req, res) => {
+app.post('/employees', isAuthenticated, isAdmin, async (req, res) => {
     const { name, employee_id } = req.body;
     if (!name || !employee_id) {
-        res.status(400).json({ error: 'Name and employee ID are required' });
-        return;
+        return res.status(400).json({ error: 'Name and employee ID are required' });
     }
-    db.run('INSERT INTO employees (employee_id, name) VALUES (?, ?)', [employee_id, name], function (err) {
-        if (err) {
-            console.error(err);
-            res.status(500).json({ error: 'Failed to add employee' });
-            return;
-        }
+    try {
+        await pool.query('INSERT INTO employees (employee_id, name) VALUES ($1, $2)', [employee_id, name]);
         res.json({ message: 'Employee added successfully' });
-    });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to add employee' });
+    }
 });
 
-app.put('/employees/:employee_id', isAuthenticated, isAdmin, (req, res) => {
+app.put('/employees/:employee_id', isAuthenticated, isAdmin, async (req, res) => {
     const employeeId = req.params.employee_id;
     const { name } = req.body;
     if (!name) {
         return res.status(400).json({ error: 'Name is required' });
     }
 
-    db.run('UPDATE employees SET name = ? WHERE employee_id = ?', [name, employeeId], function (err) {
-        if (err) {
-            console.error(err);
-            return res.status(500).json({ error: 'Failed to update employee' });
-        }
-        if (this.changes === 0) {
+    try {
+        const result = await pool.query('UPDATE employees SET name = $1 WHERE employee_id = $2', [name, employeeId]);
+        if (result.rowCount === 0) {
             return res.status(404).json({ error: 'Employee not found' });
         }
         res.json({ message: 'Employee updated successfully' });
-    });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to update employee' });
+    }
 });
 
-app.delete('/employees/:employee_id', isAuthenticated, isAdmin, (req, res) => {
+app.delete('/employees/:employee_id', isAuthenticated, isAdmin, async (req, res) => {
     const employeeId = req.params.employee_id;
-    db.run('DELETE FROM employees WHERE employee_id = ?', [employeeId], function (err) {
-        if (err) {
-            console.error(err);
-            res.status(500).json({ error: 'Failed to delete employee' });
-            return;
+    try {
+        const result = await pool.query('DELETE FROM employees WHERE employee_id = $1', [employeeId]);
+        if (result.rowCount === 0) {
+            return res.status(404).json({ error: 'Employee not found' });
         }
-        if (this.changes === 0) {
-            res.status(404).json({ error: 'Employee not found' });
-            return;
-        }
-        db.run('DELETE FROM punches WHERE employee_id = ?', [employeeId], function (err) {
-            if (err) {
-                console.error(err);
-            }
-        });
+        await pool.query('DELETE FROM punches WHERE employee_id = $1', [employeeId]);
         res.json({ message: 'Employee deleted successfully' });
-    });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to delete employee' });
+    }
 });
 
-app.post('/admin-punch', isAuthenticated, isAdmin, (req, res) => {
+app.post('/admin-punch', isAuthenticated, isAdmin, async (req, res) => {
     const { employee_id } = req.body;
     if (!employee_id) {
-        res.status(400).json({ error: 'Employee ID is required' });
-        return;
+        return res.status(400).json({ error: 'Employee ID is required' });
     }
 
-    db.get('SELECT * FROM punches WHERE employee_id = ? ORDER BY timestamp DESC LIMIT 1', [employee_id], (err, lastPunch) => {
-        if (err) {
-            console.error(err);
-            res.status(500).json({ error: 'Failed to fetch punch data' });
-            return;
-        }
+    try {
+        const { rows } = await pool.query('SELECT * FROM punches WHERE employee_id = $1 ORDER BY timestamp DESC LIMIT 1', [employee_id]);
+        const lastPunch = rows[0];
 
         const type = lastPunch && lastPunch.type === 'in' ? 'out' : 'in';
         const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
 
-        db.run('INSERT INTO punches (employee_id, type, timestamp, updated_by, notes) VALUES (?, ?, ?, ?, ?)', [employee_id, type, timestamp, req.session.user.username, null], function (err) {
-            if (err) {
-                console.error(err);
-                res.status(500).json({ error: 'Failed to record punch' });
-                return;
-            }
-            res.json({ message: `Successfully punched ${type}`, last_punch_id: this.lastID });
-        });
-    });
+        const result = await pool.query(
+            'INSERT INTO punches (employee_id, type, timestamp, updated_by, notes) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+            [employee_id, type, timestamp, req.session.user.username, null]
+        );
+        res.json({ message: `Successfully punched ${type}`, last_punch_id: result.rows[0].id });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to record punch' });
+    }
 });
 
 // Employee punch (clock in/out)
-app.post('/employee-punch', isAuthenticated, (req, res) => {
+app.post('/employee-punch', isAuthenticated, async (req, res) => {
     const user = req.session.user;
     if (user.role !== 'Employee') {
         return res.status(403).json({ error: 'Only employees can clock in/out.' });
@@ -272,55 +294,54 @@ app.post('/employee-punch', isAuthenticated, (req, res) => {
         return res.status(400).json({ error: 'Employee ID not associated with this user.' });
     }
 
-    db.get('SELECT * FROM punches WHERE employee_id = ? ORDER BY timestamp DESC LIMIT 1', [employee_id], (err, lastPunch) => {
-        if (err) {
-            console.error(err);
-            return res.status(500).json({ error: 'Failed to fetch punch data' });
-        }
+    try {
+        const { rows } = await pool.query('SELECT * FROM punches WHERE employee_id = $1 ORDER BY timestamp DESC LIMIT 1', [employee_id]);
+        const lastPunch = rows[0];
 
         const type = lastPunch && lastPunch.type === 'in' ? 'out' : 'in';
         const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
 
-        db.run('INSERT INTO punches (employee_id, type, timestamp, updated_by, notes) VALUES (?, ?, ?, ?, ?)', [employee_id, type, timestamp, null, null], function (err) {
-            if (err) {
-                console.error(err);
-                return res.status(500).json({ error: 'Failed to record punch' });
-            }
-            res.json({ message: `Successfully punched ${type}`, last_punch_id: this.lastID });
-        });
-    });
+        const result = await pool.query(
+            'INSERT INTO punches (employee_id, type, timestamp, updated_by, notes) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+            [employee_id, type, timestamp, null, null]
+        );
+        res.json({ message: `Successfully punched ${type}`, last_punch_id: result.rows[0].id });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to record punch' });
+    }
 });
 
 // Update notes for a punch
-app.put('/punch/:id/notes', isAuthenticated, (req, res) => {
+app.put('/punch/:id/notes', isAuthenticated, async (req, res) => {
     const punchId = req.params.id;
     const { notes } = req.body;
     if (!notes) {
         return res.status(400).json({ error: 'Notes are required' });
     }
 
-    db.run('UPDATE punches SET notes = ? WHERE id = ?', [notes, punchId], function (err) {
-        if (err) {
-            console.error(err);
-            return res.status(500).json({ error: 'Failed to update notes' });
-        }
-        if (this.changes === 0) {
+    try {
+        const result = await pool.query('UPDATE punches SET notes = $1 WHERE id = $2', [notes, punchId]);
+        if (result.rowCount === 0) {
             return res.status(404).json({ error: 'Punch not found' });
         }
         res.json({ message: 'Notes updated successfully' });
-    });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to update notes' });
+    }
 });
 
 // Get user associated with an employee
-app.get('/user-for-employee/:employee_id', isAuthenticated, isAdmin, (req, res) => {
+app.get('/user-for-employee/:employee_id', isAuthenticated, isAdmin, async (req, res) => {
     const employeeId = req.params.employee_id;
-    db.get('SELECT username FROM users WHERE employee_id = ?', [employeeId], (err, user) => {
-        if (err) {
-            console.error(err);
-            return res.status(500).json({ error: 'Failed to fetch user' });
-        }
-        res.json({ user });
-    });
+    try {
+        const { rows } = await pool.query('SELECT username FROM users WHERE employee_id = $1', [employeeId]);
+        res.json({ user: rows[0] });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to fetch user' });
+    }
 });
 
 // Create or update user for an employee
@@ -332,81 +353,60 @@ app.post('/user-for-employee/:employee_id', isAuthenticated, isAdmin, async (req
         return res.status(400).json({ error: 'Username is required' });
     }
 
-    // Check if employee exists
-    db.get('SELECT * FROM employees WHERE employee_id = ?', [employeeId], (err, employee) => {
-        if (err) {
-            console.error(err);
-            return res.status(500).json({ error: 'Failed to fetch employee' });
-        }
+    try {
+        const { rows: employeeRows } = await pool.query('SELECT * FROM employees WHERE employee_id = $1', [employeeId]);
+        const employee = employeeRows[0];
         if (!employee) {
             return res.status(404).json({ error: 'Employee not found' });
         }
 
-        // Check if username is already taken by another user
-        db.get('SELECT * FROM users WHERE username = ? AND employee_id != ?', [username, employeeId], async (err, existingUser) => {
-            if (err) {
-                console.error(err);
-                return res.status(500).json({ error: 'Database error' });
+        const { rows: existingUserRows } = await pool.query('SELECT * FROM users WHERE username = $1 AND employee_id != $2', [username, employeeId]);
+        if (existingUserRows.length > 0) {
+            return res.status(400).json({ error: 'Username already taken by another user' });
+        }
+
+        const { rows: userRows } = await pool.query('SELECT * FROM users WHERE employee_id = $1', [employeeId]);
+        const user = userRows[0];
+
+        if (user) {
+            // Update existing user
+            const updates = [];
+            const params = [];
+            if (username !== user.username) {
+                updates.push('username = $1');
+                params.push(username);
             }
-            if (existingUser) {
-                return res.status(400).json({ error: 'Username already taken by another user' });
+            if (password) {
+                const hashedPassword = await bcrypt.hash(password, 10);
+                updates.push('password = $2');
+                params.push(hashedPassword);
             }
+            if (updates.length === 0) {
+                return res.json({ message: 'No changes to update' });
+            }
+            params.push(user.username);
 
-            // Check if a user already exists for this employee
-            db.get('SELECT * FROM users WHERE employee_id = ?', [employeeId], async (err, user) => {
-                if (err) {
-                    console.error(err);
-                    return res.status(500).json({ error: 'Failed to fetch user' });
-                }
-
-                if (user) {
-                    // Update existing user
-                    const updates = [];
-                    const params = [];
-                    if (username !== user.username) {
-                        updates.push('username = ?');
-                        params.push(username);
-                    }
-                    if (password) {
-                        const hashedPassword = await bcrypt.hash(password, 10);
-                        updates.push('password = ?');
-                        params.push(hashedPassword);
-                    }
-                    if (updates.length === 0) {
-                        return res.json({ message: 'No changes to update' });
-                    }
-                    params.push(user.username);
-
-                    db.run(`UPDATE users SET ${updates.join(', ')} WHERE username = ?`, params, function (err) {
-                        if (err) {
-                            console.error(err);
-                            return res.status(500).json({ error: 'Failed to update user' });
-                        }
-                        res.json({ message: 'User updated successfully' });
-                    });
-                } else {
-                    // Create new user
-                    if (!password) {
-                        return res.status(400).json({ error: 'Password is required to create a new user' });
-                    }
-                    const hashedPassword = await bcrypt.hash(password, 10);
-                    db.run('INSERT INTO users (username, password, role, employee_id) VALUES (?, ?, ?, ?)',
-                        [username, hashedPassword, 'Employee', employeeId],
-                        function (err) {
-                            if (err) {
-                                console.error(err);
-                                return res.status(500).json({ error: 'Failed to create user' });
-                            }
-                            res.json({ message: 'User created successfully' });
-                        }
-                    );
-                }
-            });
-        });
-    });
+            await pool.query(`UPDATE users SET ${updates.join(', ')} WHERE username = $${params.length}`, params);
+            res.json({ message: 'User updated successfully' });
+        } else {
+            // Create new user
+            if (!password) {
+                return res.status(400).json({ error: 'Password is required to create a new user' });
+            }
+            const hashedPassword = await bcrypt.hash(password, 10);
+            await pool.query(
+                'INSERT INTO users (username, password, role, employee_id) VALUES ($1, $2, $3, $4)',
+                [username, hashedPassword, 'Employee', employeeId]
+            );
+            res.json({ message: 'User created successfully' });
+        }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to create/update user' });
+    }
 });
 
-app.get('/currently-punched-in', isAuthenticated, (req, res) => {
+app.get('/currently-punched-in', isAuthenticated, async (req, res) => {
     const query = `
         SELECT e.employee_id, e.name, p.type, p.timestamp AS punched_in_at, p.id AS last_punch_id
         FROM employees e
@@ -418,14 +418,13 @@ app.get('/currently-punched-in', isAuthenticated, (req, res) => {
             GROUP BY employee_id
         ) AND p.type = 'in'
     `;
-    db.all(query, [], (err, rows) => {
-        if (err) {
-            console.error(err);
-            res.status(500).json({ error: 'Failed to fetch punched-in employees' });
-            return;
-        }
+    try {
+        const { rows } = await pool.query(query);
         res.json({ employees: rows });
-    });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to fetch punched-in employees' });
+    }
 });
 
 app.get('/pay-periods', isAuthenticated, (req, res) => {
@@ -453,7 +452,7 @@ app.get('/pay-periods', isAuthenticated, (req, res) => {
     res.json({ pay_periods: payPeriods.reverse() });
 });
 
-app.get('/time-cards', isAuthenticated, (req, res) => {
+app.get('/time-cards', isAuthenticated, async (req, res) => {
     const payPeriod = req.query.pay_period;
     if (!payPeriod) {
         return res.status(400).json({ error: 'Pay period is required' });
@@ -468,16 +467,12 @@ app.get('/time-cards', isAuthenticated, (req, res) => {
         SELECT e.employee_id, e.name, p.id, p.type, p.timestamp
         FROM employees e
         LEFT JOIN punches p ON e.employee_id = p.employee_id
-        WHERE p.timestamp BETWEEN ? AND ?
+        WHERE p.timestamp BETWEEN $1 AND $2
         ORDER BY e.employee_id, p.timestamp
     `;
 
-    db.all(query, [periodStart.toISOString(), periodEnd.toISOString()], (err, rows) => {
-        if (err) {
-            console.error(err);
-            return res.status(500).json({ error: 'Failed to fetch time cards' });
-        }
-
+    try {
+        const { rows } = await pool.query(query, [periodStart.toISOString(), periodEnd.toISOString()]);
         const timeCards = [];
         let currentEmployee = null;
         let currentIn = null;
@@ -519,50 +514,46 @@ app.get('/time-cards', isAuthenticated, (req, res) => {
         });
 
         res.json({ timeCards });
-    });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to fetch time cards' });
+    }
 });
 
-app.get('/timecard/:employee_id', isAuthenticated, (req, res) => {
+app.get('/timecard/:employee_id', isAuthenticated, async (req, res) => {
     const employeeId = req.params.employee_id;
     const user = req.session.user;
 
-    // Allow Admins to view any timecard, Employees to view only their own
     if (user.role !== 'Admin' && user.employee_id !== employeeId) {
         return res.status(403).json({ error: 'Forbidden. You can only view your own time card.' });
     }
 
-    db.get('SELECT * FROM employees WHERE employee_id = ?', [employeeId], (err, employee) => {
-        if (err) {
-            console.error(err);
-            res.status(500).json({ error: 'Failed to fetch employee' });
-            return;
-        }
+    try {
+        const { rows: employeeRows } = await pool.query('SELECT * FROM employees WHERE employee_id = $1', [employeeId]);
+        const employee = employeeRows[0];
         if (!employee) {
-            res.status(404).json({ error: 'Employee not found' });
-            return;
+            return res.status(404).json({ error: 'Employee not found' });
         }
 
-        db.all('SELECT * FROM punches WHERE employee_id = ? ORDER BY timestamp', [employeeId], (err, punches) => {
-            if (err) {
-                console.error(err);
-                res.status(500).json({ error: 'Failed to fetch punches' });
-            }
-            res.json({ employee, punches });
-        });
-    });
+        const { rows: punches } = await pool.query('SELECT * FROM punches WHERE employee_id = $1 ORDER BY timestamp', [employeeId]);
+        res.json({ employee, punches });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to fetch punches' });
+    }
 });
 
-app.put('/punch/:id', isAuthenticated, isAdmin, (req, res) => {
+app.put('/punch/:id', isAuthenticated, isAdmin, async (req, res) => {
     const punchId = req.params.id;
     const { timestamp, notes } = req.body;
     const updates = [];
     const params = [];
     if (timestamp) {
-        updates.push('timestamp = ?');
+        updates.push('timestamp = $1');
         params.push(timestamp);
     }
     if (notes) {
-        updates.push('notes = ?');
+        updates.push('notes = $2');
         params.push(notes);
     }
     if (updates.length === 0) {
@@ -570,22 +561,34 @@ app.put('/punch/:id', isAuthenticated, isAdmin, (req, res) => {
     }
     params.push(punchId);
 
-    db.run(`UPDATE punches SET ${updates.join(', ')}, updated_by = ? WHERE id = ?`, [...params, req.session.user.username], function (err) {
-        if (err) {
-            console.error(err);
-            res.status(500).json({ error: 'Failed to update punch' });
-            return;
-        }
-        if (this.changes === 0) {
-            res.status(404).json({ error: 'Punch not found' });
-            return;
+    try {
+        const result = await pool.query(
+            `UPDATE punches SET ${updates.join(', ')}, updated_by = $${params.length + 1} WHERE id = $${params.length + 2}`,
+            [...params, req.session.user.username, punchId]
+        );
+        if (result.rowCount === 0) {
+            return res.status(404).json({ error: 'Punch not found' });
         }
         res.json({ message: 'Punch updated successfully' });
-    });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to update punch' });
+    }
 });
 
 // Start the server
 const port = process.env.PORT || 3000;
+app.post('/test-hash', async (req, res) => {
+    const { password } = req.body;
+    try {
+        const hash = await bcrypt.hash(password, 10);
+        const match = await bcrypt.compare(password, hash);
+        res.json({ hash, match });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Error testing hash.' });
+    }
+});
 app.listen(port, () => {
     console.log(`Server running on port ${port}`);
 });
