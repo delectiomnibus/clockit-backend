@@ -13,6 +13,7 @@ app.use(cors({
     methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type']
 }));
+console.log('CORS middleware applied');
 
 // Initialize PostgreSQL connection pool
 const pool = new Pool({
