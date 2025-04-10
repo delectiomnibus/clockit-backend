@@ -3,6 +3,7 @@ const express = require('express');
 const { Pool } = require('pg'); // Use pg for PostgreSQL
 const bcrypt = require('bcrypt');
 const session = require('express-session');
+const PGSession = require('connect-pg-simple')(session);
 const cookieParser = require('cookie-parser');
 const cors = require('cors');
 
@@ -98,6 +99,10 @@ pool.connect(async (err) => {
 app.use(express.json());
 app.use(cookieParser());
 app.use(session({
+    store: new PGSession({
+        pool: pool, // Use the same Postgres pool as your app
+        tableName: 'session' // Name of the table to store sessions
+    }),
     secret: 'your-secret-key',
     resave: false,
     saveUninitialized: false,
@@ -107,7 +112,7 @@ app.use(session({
         httpOnly: true
     }
 }));
-console.log('Session middleware configured with secure: true, sameSite: none');
+console.log('Session middleware configured with Postgres store');
 
 // Middleware to check if user is authenticated
 function isAuthenticated(req, res, next) {
