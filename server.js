@@ -130,7 +130,7 @@ function isAdmin(req, res, next) {
     res.status(403).json({ error: 'Forbidden. Admin access required.' });
 }
 
-// Login endpoint
+// Login endpoint with added debugging
 app.post('/login', async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) {
@@ -157,8 +157,17 @@ app.post('/login', async (req, res) => {
         }
 
         req.session.user = { username: user.username, role: user.role, employee_id: user.employee_id };
-        console.log('Login successful, setting session.');
-        res.json({ message: 'Login successful.', role: user.role });
+        console.log('Session after setting user:', req.session);
+
+        // Explicitly save the session
+        req.session.save((err) => {
+            if (err) {
+                console.error('Error saving session:', err);
+                return res.status(500).json({ error: 'Failed to save session.' });
+            }
+            console.log('Session saved successfully');
+            res.json({ message: 'Login successful.', role: user.role });
+        });
     } catch (err) {
         console.error('Error during login:', err);
         res.status(500).json({ error: 'Database error.' });
