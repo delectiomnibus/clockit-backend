@@ -188,6 +188,7 @@ app.post('/logout', (req, res) => {
 // Get current user (for frontend to check login status)
 app.get('/current-user', (req, res) => {
     console.log('Received /current-user request');
+    console.log('Session ID (sid):', req.sessionID);
     console.log('Session data:', req.session);
     if (req.session.user) {
         console.log('User is logged in:', req.session.user);
