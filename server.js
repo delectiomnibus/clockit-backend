@@ -101,8 +101,13 @@ app.use(session({
     secret: 'your-secret-key',
     resave: false,
     saveUninitialized: false,
-    cookie: { secure: false }
+    cookie: { 
+        secure: true,
+        sameSite: 'none',
+        httpOnly: true
+    }
 }));
+console.log('Session middleware configured with secure: true, sameSite: none');
 
 // Middleware to check if user is authenticated
 function isAuthenticated(req, res, next) {
