@@ -18,10 +18,15 @@ console.log('CORS middleware applied');
 
 // Initialize PostgreSQL connection pool
 const pool = new Pool({
-    connectionString: process.env.POSTGRES_URL, // Use the Vercel-provided POSTGRES_URL
-    ssl: {
-        rejectUnauthorized: false // Required for Neon Postgres with sslmode=require
-    }
+    connectionString: process.env.POSTGRES_URL,
+    ssl: { rejectUnauthorized: false },
+    connectionTimeoutMillis: 5000, // 5 seconds timeout
+    idleTimeoutMillis: 30000, // 30 seconds idle timeout
+    max: 20 // Maximum number of clients in the pool
+});
+
+pool.on('error', (err, client) => {
+    console.error('Unexpected error on idle client:', err);
 });
 
 // Test the database connection
@@ -166,6 +171,7 @@ app.post('/login', async (req, res) => {
                 return res.status(500).json({ error: 'Failed to save session.' });
             }
             console.log('Session saved successfully');
+            console.log('Session ID after save:', req.sessionID);
             res.json({ message: 'Login successful.', role: user.role });
         });
     } catch (err) {
