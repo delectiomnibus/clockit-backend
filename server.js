@@ -20,7 +20,7 @@ console.log('CORS middleware applied');
 const pool = new Pool({
     connectionString: process.env.POSTGRES_URL,
     ssl: { rejectUnauthorized: false },
-    connectionTimeoutMillis: 5000, // 5 seconds timeout
+    connectionTimeoutMillis: 30000, // 5 seconds timeout
     idleTimeoutMillis: 30000, // 30 seconds idle timeout
     max: 20 // Maximum number of clients in the pool
 });
@@ -202,6 +202,16 @@ app.get('/current-user', (req, res) => {
     } else {
         console.log('No user in session, user is not logged in');
         res.json({ loggedIn: false });
+    }
+});
+
+// for testing connection
+app.get('/test-db', async (req, res) => {
+    try {
+        const { rows } = await pool.query('SELECT NOW()');
+        res.json({ time: rows[0].now });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
 
