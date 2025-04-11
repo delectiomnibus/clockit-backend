@@ -1,6 +1,6 @@
 require('dotenv').config();
 const express = require('express');
-const { Pool } = require('pg'); // Use pg for PostgreSQL
+const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const session = require('express-session');
 const PGSession = require('connect-pg-simple')(session);
@@ -20,84 +20,117 @@ console.log('CORS middleware applied');
 const pool = new Pool({
     connectionString: process.env.POSTGRES_URL,
     ssl: { rejectUnauthorized: false },
-    connectionTimeoutMillis: 30000, // 5 seconds timeout
-    idleTimeoutMillis: 30000, // 30 seconds idle timeout
-    max: 20 // Maximum number of clients in the pool
+    connectionTimeoutMillis: 30000,
+    idleTimeoutMillis: 30000,
+    max: 5 // Reduced to avoid Neon's free-tier limits
 });
 
 pool.on('error', (err, client) => {
     console.error('Unexpected error on idle client:', err);
 });
 
-// Test the database connection
-pool.connect(async (err) => {
-    if (err) {
-        console.error('Error connecting to PostgreSQL:', err.message);
-    } else {
-        console.log('Connected to PostgreSQL database.');
+// Retry logic for database connection
+const retry = async (fn, retries = 3, delay = 5000) => {
+    for (let i = 0; i < retries; i++) {
         try {
-            // Drop tables (in reverse order due to foreign key dependencies)
-            await pool.query('DROP TABLE IF EXISTS punches');
-            await pool.query('DROP TABLE IF EXISTS users');
-            await pool.query('DROP TABLE IF EXISTS employees');
-
-            // Create tables
-            await pool.query(`
-                CREATE TABLE employees (
-                    employee_id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL
-                );
-            `);
-            await pool.query(`
-                CREATE TABLE punches (
-                    id SERIAL PRIMARY KEY,
-                    employee_id TEXT,
-                    type TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    updated_by TEXT,
-                    notes TEXT,
-                    FOREIGN KEY (employee_id) REFERENCES employees(employee_id)
-                );
-            `);
-            await pool.query(`
-                CREATE TABLE users (
-                    username TEXT PRIMARY KEY,
-                    password TEXT NOT NULL,
-                    role TEXT NOT NULL CHECK(role IN ('Admin', 'Employee')),
-                    employee_id TEXT,
-                    FOREIGN KEY (employee_id) REFERENCES employees(employee_id)
-                );
-            `);
-
-            // Insert employees
-            await pool.query(
-                'INSERT INTO employees (employee_id, name) VALUES ($1, $2) ON CONFLICT (employee_id) DO NOTHING',
-                ['admin1', 'Admin User']
-            );
-            await pool.query(
-                'INSERT INTO employees (employee_id, name) VALUES ($1, $2) ON CONFLICT (employee_id) DO NOTHING',
-                ['andrew1', 'Andrew']
-            );
-
-            // Generate fresh password hashes
-            const adminPassword = await bcrypt.hash('admin', 10);
-            const andrewPassword = await bcrypt.hash('andrew', 10);
-
-            // Insert users with fresh hashes
-            await pool.query(
-                'INSERT INTO users (username, password, role, employee_id) VALUES ($1, $2, $3, $4) ON CONFLICT (username) DO UPDATE SET password = $2, role = $3, employee_id = $4',
-                ['admin', adminPassword, 'Admin', 'admin1']
-            );
-            await pool.query(
-                'INSERT INTO users (username, password, role, employee_id) VALUES ($1, $2, $3, $4) ON CONFLICT (username) DO UPDATE SET password = $2, role = $3, employee_id = $4',
-                ['Andrew', andrewPassword, 'Employee', 'andrew1']
-            );
-
-            console.log('Tables created and data pre-populated successfully.');
+            return await fn();
         } catch (err) {
-            console.error('Error setting up database:', err.message);
+            if (i === retries - 1) throw err;
+            console.log(`Retrying connection (${i + 1}/${retries})...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
         }
     }
+};
+
+// Test the database connection and set up tables
+retry(async () => {
+    await pool.connect(async (err, client, release) => {
+        if (err) {
+            console.error('Error connecting to PostgreSQL:', err.message);
+            throw err;
+        }
+        try {
+            console.log('Connected to PostgreSQL database.');
+            const { rows } = await pool.query(`
+                SELECT EXISTS (
+                    SELECT FROM pg_tables 
+                    WHERE schemaname = 'public' AND tablename = 'users'
+                );
+            `);
+            const usersTableExists = rows[0].exists;
+
+            if (!usersTableExists) {
+                // Drop tables (in reverse order due to foreign key dependencies)
+                await pool.query('DROP TABLE IF EXISTS punches');
+                await pool.query('DROP TABLE IF EXISTS users');
+                await pool.query('DROP TABLE IF EXISTS employees');
+
+                // Create tables
+                await pool.query(`
+                    CREATE TABLE employees (
+                        employee_id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL
+                    );
+                `);
+                await pool.query(`
+                    CREATE TABLE punches (
+                        id SERIAL PRIMARY KEY,
+                        employee_id TEXT,
+                        type TEXT NOT NULL,
+                        timestamp TEXT NOT NULL,
+                        updated_by TEXT,
+                        notes TEXT,
+                        FOREIGN KEY (employee_id) REFERENCES employees(employee_id)
+                    );
+                `);
+                await pool.query(`
+                    CREATE TABLE users (
+                        username TEXT PRIMARY KEY,
+                        password TEXT NOT NULL,
+                        role TEXT NOT NULL CHECK(role IN ('Admin', 'Employee')),
+                        employee_id TEXT,
+                        FOREIGN KEY (employee_id) REFERENCES employees(employee_id)
+                    );
+                `);
+
+                // Insert employees
+                await pool.query(
+                    'INSERT INTO employees (employee_id, name) VALUES ($1, $2) ON CONFLICT (employee_id) DO NOTHING',
+                    ['admin1', 'Admin User']
+                );
+                await pool.query(
+                    'INSERT INTO employees (employee_id, name) VALUES ($1, $2) ON CONFLICT (employee_id) DO NOTHING',
+                    ['andrew1', 'Andrew']
+                );
+
+                // Generate fresh password hashes
+                const adminPassword = await bcrypt.hash('admin', 10);
+                const andrewPassword = await bcrypt.hash('andrew', 10);
+
+                // Insert users with fresh hashes
+                await pool.query(
+                    'INSERT INTO users (username, password, role, employee_id) VALUES ($1, $2, $3, $4) ON CONFLICT (username) DO UPDATE SET password = $2, role = $3, employee_id = $4',
+                    ['admin', adminPassword, 'Admin', 'admin1']
+                );
+                await pool.query(
+                    'INSERT INTO users (username, password, role, employee_id) VALUES ($1, $2, $3, $4) ON CONFLICT (username) DO UPDATE SET password = $2, role = $3, employee_id = $4',
+                    ['Andrew', andrewPassword, 'Employee', 'andrew1']
+                );
+
+                console.log('Tables created and data pre-populated successfully.');
+            } else {
+                console.log('Tables already exist, skipping initialization.');
+            }
+        } catch (err) {
+            console.error('Error setting up database:', err.message);
+            throw err;
+        } finally {
+            release();
+        }
+    });
+}).catch(err => {
+    console.error('Failed to connect after retries:', err.message);
+    process.exit(1);
 });
 
 // Middleware
@@ -105,16 +138,17 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(session({
     store: new PGSession({
-        pool: pool, // Use the same Postgres pool as your app
-        tableName: 'session' // Name of the table to store sessions
+        pool: pool,
+        tableName: 'session'
     }),
-    secret: 'your-secret-key',
+    secret: process.env.SESSION_SECRET || 'your-secret-key',
     resave: false,
     saveUninitialized: false,
     cookie: { 
         secure: true,
         sameSite: 'none',
-        httpOnly: true
+        httpOnly: true,
+        maxAge: 24 * 60 * 60 * 1000 // 24 hours
     }
 }));
 console.log('Session middleware configured with Postgres store');
@@ -135,48 +169,39 @@ function isAdmin(req, res, next) {
     res.status(403).json({ error: 'Forbidden. Admin access required.' });
 }
 
-// Login endpoint with added debugging
+// Login endpoint with debugging
 app.post('/login', async (req, res) => {
     const { username, password } = req.body;
-    if (!username || !password) {
-        return res.status(400).json({ error: 'Username and password are required.' });
-    }
-
+    console.log('Login attempt for username:', username);
     try {
-        console.log(`Login attempt for username: ${username}`);
         const { rows } = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+        if (rows.length === 0) {
+            console.log('User not found:', username);
+            return res.status(401).json({ error: 'User not found.' });
+        }
         const user = rows[0];
-        if (!user) {
-            console.log(`User not found: ${username}`);
-            return res.status(401).json({ error: 'Invalid username or password.' });
-        }
-
-        console.log(`User found: ${JSON.stringify(user)}`);
-        console.log(`Comparing password: ${password} against hash: ${user.password}`);
+        console.log('User found:', user);
         const match = await bcrypt.compare(password, user.password);
-        console.log(`Password match result: ${match}`);
-
+        console.log('Comparing password:', password, 'against hash:', user.password);
+        console.log('Password match result:', match);
         if (!match) {
-            console.log('Password comparison failed.');
-            return res.status(401).json({ error: 'Invalid username or password.' });
+            return res.status(401).json({ error: 'Invalid password.' });
         }
-
         req.session.user = { username: user.username, role: user.role, employee_id: user.employee_id };
         console.log('Session after setting user:', req.session);
-
-        // Explicitly save the session
         req.session.save((err) => {
             if (err) {
                 console.error('Error saving session:', err);
-                return res.status(500).json({ error: 'Failed to save session.' });
+                return res.status(500).json({ error: 'Error saving session.' });
             }
             console.log('Session saved successfully');
             console.log('Session ID after save:', req.sessionID);
-            res.json({ message: 'Login successful.', role: user.role });
+            console.log('Set-Cookie header should be set with:', `connect.sid=s%3A${req.sessionID}`);
+            res.json({ role: user.role });
         });
     } catch (err) {
-        console.error('Error during login:', err);
-        res.status(500).json({ error: 'Database error.' });
+        console.error(err);
+        res.status(500).json({ error: 'Error logging in.' });
     }
 });
 
@@ -205,7 +230,7 @@ app.get('/current-user', (req, res) => {
     }
 });
 
-// for testing connection
+// For testing connection
 app.get('/test-db', async (req, res) => {
     try {
         const { rows } = await pool.query('SELECT NOW()');
@@ -615,8 +640,7 @@ app.put('/punch/:id', isAuthenticated, isAdmin, async (req, res) => {
     }
 });
 
-// Start the server
-const port = process.env.PORT || 3000;
+// Test hash endpoint
 app.post('/test-hash', async (req, res) => {
     const { password } = req.body;
     try {
@@ -628,6 +652,9 @@ app.post('/test-hash', async (req, res) => {
         res.status(500).json({ error: 'Error testing hash.' });
     }
 });
+
+// Start the server
+const port = process.env.PORT || 3000;
 app.listen(port, () => {
     console.log(`Server running on port ${port}`);
 });
