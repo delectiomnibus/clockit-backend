@@ -29,9 +29,10 @@ console.log('POSTGRES_URL:', process.env.POSTGRES_URL ? 'Set' : 'Not set');
 const pool = new Pool({
     connectionString: process.env.POSTGRES_URL,
     ssl: { rejectUnauthorized: false },
-    connectionTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
     idleTimeoutMillis: 30000,
-    max: 5
+    max: 5,
+    keepAlive: true
 });
 
 pool.on('error', (err, client) => {
@@ -39,7 +40,7 @@ pool.on('error', (err, client) => {
 });
 
 // Retry logic for database connection
-const retry = async (fn, retries = 3, delay = 5000) => {
+const retry = async (fn, retries = 5, delay = 5000) => {
     for (let i = 0; i < retries; i++) {
         try {
             return await fn();
@@ -54,7 +55,7 @@ const retry = async (fn, retries = 3, delay = 5000) => {
 
 // Test the database connection and set up the session table
 let dbConnected = false;
-(async () => {
+const connectToDb = async () => {
     try {
         await retry(async () => {
             const client = await pool.connect();
@@ -70,6 +71,26 @@ let dbConnected = false;
                 `);
                 console.log('Session table created or already exists.');
                 dbConnected = true;
+
+                // Set up session middleware after database connection succeeds
+                const sessionSecret = process.env.SESSION_SECRET || 'your-secret-key';
+                console.log('Using SESSION_SECRET:', sessionSecret);
+                app.use(session({
+                    store: new PGSession({
+                        pool: pool,
+                        tableName: 'session'
+                    }),
+                    secret: sessionSecret,
+                    resave: false,
+                    saveUninitialized: false,
+                    cookie: { 
+                        secure: true,
+                        sameSite: 'none',
+                        httpOnly: true,
+                        maxAge: 24 * 60 * 60 * 1000 // 24 hours
+                    }
+                }));
+                console.log('Session middleware configured with Postgres store');
             } catch (err) {
                 console.error('Error setting up session table:', err.message);
                 throw err;
@@ -80,41 +101,25 @@ let dbConnected = false;
     } catch (err) {
         console.error('Failed to connect to database after retries:', err.message);
         dbConnected = false;
+        // Retry connection every 30 seconds
+        setTimeout(connectToDb, 30000);
     }
-})();
+};
+
+// Initial database connection attempt
+connectToDb();
 
 // Other middleware
 app.use(express.json());
 app.use(cookieParser());
 
-// Only set up session middleware if database connection succeeded
-if (dbConnected) {
-    const sessionSecret = process.env.SESSION_SECRET || 'your-secret-key';
-    console.log('Using SESSION_SECRET:', sessionSecret);
-    app.use(session({
-        store: new PGSession({
-            pool: pool,
-            tableName: 'session'
-        }),
-        secret: sessionSecret,
-        resave: false,
-        saveUninitialized: false,
-        cookie: { 
-            secure: true,
-            sameSite: 'none',
-            httpOnly: true,
-            maxAge: 24 * 60 * 60 * 1000 // 24 hours
-        }
-    }));
-    console.log('Session middleware configured with Postgres store');
-} else {
-    console.error('Session middleware not configured: Database connection failed.');
-}
-
 // Middleware to check if user is authenticated
 function isAuthenticated(req, res, next) {
     if (!dbConnected) {
         return res.status(503).json({ error: 'Service unavailable: Database connection failed.' });
+    }
+    if (!req.session) {
+        return res.status(500).json({ error: 'Session middleware not initialized.' });
     }
     if (req.session.user) {
         return next();
@@ -127,6 +132,9 @@ function isAdmin(req, res, next) {
     if (!dbConnected) {
         return res.status(503).json({ error: 'Service unavailable: Database connection failed.' });
     }
+    if (!req.session) {
+        return res.status(500).json({ error: 'Session middleware not initialized.' });
+    }
     if (req.session.user && req.session.user.role === 'Admin') {
         return next();
     }
@@ -137,6 +145,9 @@ function isAdmin(req, res, next) {
 app.post('/login', async (req, res) => {
     if (!dbConnected) {
         return res.status(503).json({ error: 'Service unavailable: Database connection failed.' });
+    }
+    if (!req.session) {
+        return res.status(500).json({ error: 'Session middleware not initialized.' });
     }
     const { username, password } = req.body;
     console.log('Login attempt for username:', username);
@@ -167,7 +178,7 @@ app.post('/login', async (req, res) => {
             res.json({ role: user.role });
         });
     } catch (err) {
-        console.error(err);
+        console.error('Error logging in:', err);
         res.status(500).json({ error: 'Error logging in.' });
     }
 });
@@ -176,6 +187,9 @@ app.post('/login', async (req, res) => {
 app.post('/logout', (req, res) => {
     if (!dbConnected) {
         return res.status(503).json({ error: 'Service unavailable: Database connection failed.' });
+    }
+    if (!req.session) {
+        return res.status(500).json({ error: 'Session middleware not initialized.' });
     }
     req.session.destroy((err) => {
         if (err) {
@@ -190,6 +204,9 @@ app.post('/logout', (req, res) => {
 app.get('/current-user', (req, res) => {
     if (!dbConnected) {
         return res.status(503).json({ error: 'Service unavailable: Database connection failed.' });
+    }
+    if (!req.session) {
+        return res.status(500).json({ error: 'Session middleware not initialized.' });
     }
     console.log('Received /current-user request');
     console.log('Session ID (sid):', req.sessionID);
@@ -217,6 +234,9 @@ app.get('/test-db', async (req, res) => {
 app.post('/register', async (req, res) => {
     if (!dbConnected) {
         return res.status(503).json({ error: 'Service unavailable: Database connection failed.' });
+    }
+    if (!req.session) {
+        return res.status(500).json({ error: 'Session middleware not initialized.' });
     }
     const { username, password, role, employee_id } = req.body;
     if (!username || !password || !role) {
