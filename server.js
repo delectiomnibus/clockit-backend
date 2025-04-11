@@ -18,6 +18,11 @@ app.use(cors({
 }));
 console.log('CORS middleware applied');
 
+// Explicitly handle OPTIONS requests
+app.options('*', (req, res) => {
+    res.status(200).send();
+});
+
 // Initialize PostgreSQL connection pool
 const pool = new Pool({
     connectionString: process.env.POSTGRES_URL,
@@ -37,6 +42,7 @@ const retry = async (fn, retries = 3, delay = 5000) => {
         try {
             return await fn();
         } catch (err) {
+            console.error(`Connection attempt ${i + 1}/${retries} failed:`, err.message);
             if (i === retries - 1) throw err;
             console.log(`Retrying connection (${i + 1}/${retries})...`);
             await new Promise(resolve => setTimeout(resolve, delay));
@@ -45,6 +51,7 @@ const retry = async (fn, retries = 3, delay = 5000) => {
 };
 
 // Test the database connection and set up the session table
+let dbConnected = false;
 retry(async () => {
     await pool.connect(async (err, client, release) => {
         if (err) {
@@ -64,6 +71,7 @@ retry(async () => {
                 );
             `);
             console.log('Session table created or already exists.');
+            dbConnected = true;
         } catch (err) {
             console.error('Error setting up session table:', err.message);
             throw err;
@@ -72,34 +80,44 @@ retry(async () => {
         }
     });
 }).catch(err => {
-    console.error('Failed to connect after retries:', err.message);
-    process.exit(1);
+    console.error('Failed to connect to database after retries:', err.message);
+    // Don't exit in Vercel serverless environment; let the app continue to handle requests
+    dbConnected = false;
 });
 
 // Other middleware
 app.use(express.json());
 app.use(cookieParser());
-const sessionSecret = process.env.SESSION_SECRET || 'your-secret-key';
-console.log('Using SESSION_SECRET:', sessionSecret);
-app.use(session({
-    store: new PGSession({
-        pool: pool,
-        tableName: 'session'
-    }),
-    secret: sessionSecret,
-    resave: false,
-    saveUninitialized: false,
-    cookie: { 
-        secure: true,
-        sameSite: 'none',
-        httpOnly: true,
-        maxAge: 24 * 60 * 60 * 1000 // 24 hours
-    }
-}));
-console.log('Session middleware configured with Postgres store');
+
+// Only set up session middleware if database connection succeeded
+if (dbConnected) {
+    const sessionSecret = process.env.SESSION_SECRET || 'your-secret-key';
+    console.log('Using SESSION_SECRET:', sessionSecret);
+    app.use(session({
+        store: new PGSession({
+            pool: pool,
+            tableName: 'session'
+        }),
+        secret: sessionSecret,
+        resave: false,
+        saveUninitialized: false,
+        cookie: { 
+            secure: true,
+            sameSite: 'none',
+            httpOnly: true,
+            maxAge: 24 * 60 * 60 * 1000 // 24 hours
+        }
+    }));
+    console.log('Session middleware configured with Postgres store');
+} else {
+    console.error('Session middleware not configured: Database connection failed.');
+}
 
 // Middleware to check if user is authenticated
 function isAuthenticated(req, res, next) {
+    if (!dbConnected) {
+        return res.status(503).json({ error: 'Service unavailable: Database connection failed.' });
+    }
     if (req.session.user) {
         return next();
     }
@@ -108,6 +126,9 @@ function isAuthenticated(req, res, next) {
 
 // Middleware to check if user is an Admin
 function isAdmin(req, res, next) {
+    if (!dbConnected) {
+        return res.status(503).json({ error: 'Service unavailable: Database connection failed.' });
+    }
     if (req.session.user && req.session.user.role === 'Admin') {
         return next();
     }
@@ -116,6 +137,9 @@ function isAdmin(req, res, next) {
 
 // Login endpoint with debugging
 app.post('/login', async (req, res) => {
+    if (!dbConnected) {
+        return res.status(503).json({ error: 'Service unavailable: Database connection failed.' });
+    }
     const { username, password } = req.body;
     console.log('Login attempt for username:', username);
     try {
@@ -152,6 +176,9 @@ app.post('/login', async (req, res) => {
 
 // Logout endpoint
 app.post('/logout', (req, res) => {
+    if (!dbConnected) {
+        return res.status(503).json({ error: 'Service unavailable: Database connection failed.' });
+    }
     req.session.destroy((err) => {
         if (err) {
             console.error(err);
@@ -163,6 +190,9 @@ app.post('/logout', (req, res) => {
 
 // Get current user (for frontend to check login status)
 app.get('/current-user', (req, res) => {
+    if (!dbConnected) {
+        return res.status(503).json({ error: 'Service unavailable: Database connection failed.' });
+    }
     console.log('Received /current-user request');
     console.log('Session ID (sid):', req.sessionID);
     console.log('Session data:', req.session);
@@ -187,6 +217,9 @@ app.get('/test-db', async (req, res) => {
 
 // Register endpoint (for creating initial Admin user)
 app.post('/register', async (req, res) => {
+    if (!dbConnected) {
+        return res.status(503).json({ error: 'Service unavailable: Database connection failed.' });
+    }
     const { username, password, role, employee_id } = req.body;
     if (!username || !password || !role) {
         return res.status(400).json({ error: 'Username, password, and role are required.' });
