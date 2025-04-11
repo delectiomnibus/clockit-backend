@@ -22,7 +22,7 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false },
     connectionTimeoutMillis: 30000,
     idleTimeoutMillis: 30000,
-    max: 5 // Reduced to avoid Neon's free-tier limits
+    max: 5
 });
 
 pool.on('error', (err, client) => {
@@ -42,7 +42,7 @@ const retry = async (fn, retries = 3, delay = 5000) => {
     }
 };
 
-// Test the database connection and set up tables
+// Test the database connection and set up the session table
 retry(async () => {
     await pool.connect(async (err, client, release) => {
         if (err) {
@@ -51,78 +51,19 @@ retry(async () => {
         }
         try {
             console.log('Connected to PostgreSQL database.');
-            const { rows } = await pool.query(`
-                SELECT EXISTS (
-                    SELECT FROM pg_tables 
-                    WHERE schemaname = 'public' AND tablename = 'users'
+
+            // Create session table if it doesn't exist (required by connect-pg-simple)
+            await pool.query(`
+                CREATE TABLE IF NOT EXISTS session (
+                    sid VARCHAR NOT NULL COLLATE "default",
+                    sess JSON NOT NULL,
+                    expire TIMESTAMP(6) NOT NULL,
+                    PRIMARY KEY (sid)
                 );
             `);
-            const usersTableExists = rows[0].exists;
-
-            if (!usersTableExists) {
-                // Drop tables (in reverse order due to foreign key dependencies)
-                await pool.query('DROP TABLE IF EXISTS punches');
-                await pool.query('DROP TABLE IF EXISTS users');
-                await pool.query('DROP TABLE IF EXISTS employees');
-
-                // Create tables
-                await pool.query(`
-                    CREATE TABLE employees (
-                        employee_id TEXT PRIMARY KEY,
-                        name TEXT NOT NULL
-                    );
-                `);
-                await pool.query(`
-                    CREATE TABLE punches (
-                        id SERIAL PRIMARY KEY,
-                        employee_id TEXT,
-                        type TEXT NOT NULL,
-                        timestamp TEXT NOT NULL,
-                        updated_by TEXT,
-                        notes TEXT,
-                        FOREIGN KEY (employee_id) REFERENCES employees(employee_id)
-                    );
-                `);
-                await pool.query(`
-                    CREATE TABLE users (
-                        username TEXT PRIMARY KEY,
-                        password TEXT NOT NULL,
-                        role TEXT NOT NULL CHECK(role IN ('Admin', 'Employee')),
-                        employee_id TEXT,
-                        FOREIGN KEY (employee_id) REFERENCES employees(employee_id)
-                    );
-                `);
-
-                // Insert employees
-                await pool.query(
-                    'INSERT INTO employees (employee_id, name) VALUES ($1, $2) ON CONFLICT (employee_id) DO NOTHING',
-                    ['admin1', 'Admin User']
-                );
-                await pool.query(
-                    'INSERT INTO employees (employee_id, name) VALUES ($1, $2) ON CONFLICT (employee_id) DO NOTHING',
-                    ['andrew1', 'Andrew']
-                );
-
-                // Generate fresh password hashes
-                const adminPassword = await bcrypt.hash('admin', 10);
-                const andrewPassword = await bcrypt.hash('andrew', 10);
-
-                // Insert users with fresh hashes
-                await pool.query(
-                    'INSERT INTO users (username, password, role, employee_id) VALUES ($1, $2, $3, $4) ON CONFLICT (username) DO UPDATE SET password = $2, role = $3, employee_id = $4',
-                    ['admin', adminPassword, 'Admin', 'admin1']
-                );
-                await pool.query(
-                    'INSERT INTO users (username, password, role, employee_id) VALUES ($1, $2, $3, $4) ON CONFLICT (username) DO UPDATE SET password = $2, role = $3, employee_id = $4',
-                    ['Andrew', andrewPassword, 'Employee', 'andrew1']
-                );
-
-                console.log('Tables created and data pre-populated successfully.');
-            } else {
-                console.log('Tables already exist, skipping initialization.');
-            }
+            console.log('Session table created or already exists.');
         } catch (err) {
-            console.error('Error setting up database:', err.message);
+            console.error('Error setting up session table:', err.message);
             throw err;
         } finally {
             release();
@@ -136,12 +77,14 @@ retry(async () => {
 // Middleware
 app.use(express.json());
 app.use(cookieParser());
+const sessionSecret = process.env.SESSION_SECRET || 'your-secret-key';
+console.log('Using SESSION_SECRET:', sessionSecret);
 app.use(session({
     store: new PGSession({
         pool: pool,
         tableName: 'session'
     }),
-    secret: process.env.SESSION_SECRET || 'your-secret-key',
+    secret: sessionSecret,
     resave: false,
     saveUninitialized: false,
     cookie: { 
