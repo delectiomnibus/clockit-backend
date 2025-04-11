@@ -20,10 +20,12 @@ console.log('CORS middleware applied');
 
 // Explicitly handle OPTIONS requests
 app.options('*', (req, res) => {
+    console.log('Handling OPTIONS request for:', req.path);
     res.status(200).send();
 });
 
 // Initialize PostgreSQL connection pool
+console.log('POSTGRES_URL:', process.env.POSTGRES_URL ? 'Set' : 'Not set');
 const pool = new Pool({
     connectionString: process.env.POSTGRES_URL,
     ssl: { rejectUnauthorized: false },
@@ -52,38 +54,34 @@ const retry = async (fn, retries = 3, delay = 5000) => {
 
 // Test the database connection and set up the session table
 let dbConnected = false;
-retry(async () => {
-    await pool.connect(async (err, client, release) => {
-        if (err) {
-            console.error('Error connecting to PostgreSQL:', err.message);
-            throw err;
-        }
-        try {
-            console.log('Connected to PostgreSQL database.');
-
-            // Create session table if it doesn't exist (required by connect-pg-simple)
-            await pool.query(`
-                CREATE TABLE IF NOT EXISTS session (
-                    sid VARCHAR NOT NULL COLLATE "default",
-                    sess JSON NOT NULL,
-                    expire TIMESTAMP(6) NOT NULL,
-                    PRIMARY KEY (sid)
-                );
-            `);
-            console.log('Session table created or already exists.');
-            dbConnected = true;
-        } catch (err) {
-            console.error('Error setting up session table:', err.message);
-            throw err;
-        } finally {
-            release();
-        }
-    });
-}).catch(err => {
-    console.error('Failed to connect to database after retries:', err.message);
-    // Don't exit in Vercel serverless environment; let the app continue to handle requests
-    dbConnected = false;
-});
+(async () => {
+    try {
+        await retry(async () => {
+            const client = await pool.connect();
+            try {
+                console.log('Connected to PostgreSQL database.');
+                await client.query(`
+                    CREATE TABLE IF NOT EXISTS session (
+                        sid VARCHAR NOT NULL COLLATE "default",
+                        sess JSON NOT NULL,
+                        expire TIMESTAMP(6) NOT NULL,
+                        PRIMARY KEY (sid)
+                    );
+                `);
+                console.log('Session table created or already exists.');
+                dbConnected = true;
+            } catch (err) {
+                console.error('Error setting up session table:', err.message);
+                throw err;
+            } finally {
+                client.release();
+            }
+        });
+    } catch (err) {
+        console.error('Failed to connect to database after retries:', err.message);
+        dbConnected = false;
+    }
+})();
 
 // Other middleware
 app.use(express.json());
