@@ -21,7 +21,7 @@ console.log('CORS middleware applied');
 // Explicitly handle OPTIONS requests
 app.options('*', (req, res) => {
     console.log('Handling OPTIONS request for:', req.path);
-    res.status(200).send();
+    res.status(204).send();
 });
 
 // Initialize PostgreSQL connection pool
@@ -71,26 +71,6 @@ const connectToDb = async () => {
                 `);
                 console.log('Session table created or already exists.');
                 dbConnected = true;
-
-                // Set up session middleware after database connection succeeds
-                const sessionSecret = process.env.SESSION_SECRET || 'your-secret-key';
-                console.log('Using SESSION_SECRET:', sessionSecret);
-                app.use(session({
-                    store: new PGSession({
-                        pool: pool,
-                        tableName: 'session'
-                    }),
-                    secret: sessionSecret,
-                    resave: false,
-                    saveUninitialized: false,
-                    cookie: { 
-                        secure: true,
-                        sameSite: 'none',
-                        httpOnly: true,
-                        maxAge: 24 * 60 * 60 * 1000 // 24 hours
-                    }
-                }));
-                console.log('Session middleware configured with Postgres store');
             } catch (err) {
                 console.error('Error setting up session table:', err.message);
                 throw err;
@@ -98,6 +78,19 @@ const connectToDb = async () => {
                 client.release();
             }
         });
+
+        // Periodically ping the database to keep the connection alive
+        setInterval(async () => {
+            try {
+                await pool.query('SELECT 1');
+                console.log('Database ping successful.');
+            } catch (err) {
+                console.error('Database ping failed:', err.message);
+                dbConnected = false;
+                // Attempt to reconnect
+                connectToDb().catch(err => console.error('Reconnection failed:', err.message));
+            }
+        }, 30000); // Ping every 30 seconds
     } catch (err) {
         console.error('Failed to connect to database after retries:', err.message);
         dbConnected = false;
@@ -106,8 +99,25 @@ const connectToDb = async () => {
     }
 };
 
-// Initial database connection attempt
-connectToDb();
+// Set up session middleware immediately with a fallback
+const sessionSecret = process.env.SESSION_SECRET || 'your-secret-key';
+console.log('Using SESSION_SECRET:', sessionSecret);
+app.use(session({
+    store: new PGSession({
+        pool: pool,
+        tableName: 'session'
+    }),
+    secret: sessionSecret,
+    resave: false,
+    saveUninitialized: false,
+    cookie: { 
+        secure: true,
+        sameSite: 'none',
+        httpOnly: true,
+        maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    }
+}));
+console.log('Session middleware configured with Postgres store (will use in-memory if DB fails)');
 
 // Other middleware
 app.use(express.json());
@@ -649,8 +659,13 @@ app.post('/test-hash', async (req, res) => {
     }
 });
 
-// Start the server
+// Start the server after initial database connection attempt
 const port = process.env.PORT || 3000;
-app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
+connectToDb().then(() => {
+    app.listen(port, () => {
+        console.log(`Server running on port ${port}`);
+    });
+}).catch(err => {
+    console.error('Failed to start server due to database connection error:', err.message);
+    process.exit(1);
 });
