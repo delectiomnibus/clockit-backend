@@ -8,11 +8,13 @@ const cookieParser = require('cookie-parser');
 const cors = require('cors');
 
 const app = express();
+
+// Apply CORS middleware first
 app.use(cors({
     origin: ['http://localhost:8080', 'http://127.0.0.1:8080', 'https://clockit-frontend.vercel.app'],
     credentials: true,
     methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type']
+    allowedHeaders: ['Content-Type', 'Authorization']
 }));
 console.log('CORS middleware applied');
 
@@ -74,7 +76,7 @@ retry(async () => {
     process.exit(1);
 });
 
-// Middleware
+// Other middleware
 app.use(express.json());
 app.use(cookieParser());
 const sessionSecret = process.env.SESSION_SECRET || 'your-secret-key';
