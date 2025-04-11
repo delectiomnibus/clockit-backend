@@ -177,18 +177,25 @@ app.post('/login', async (req, res) => {
         }
         req.session.user = { username: user.username, role: user.role, employee_id: user.employee_id };
         console.log('Session after setting user:', req.session);
-        req.session.save((err) => {
-            if (err) {
-                console.error('Error saving session:', err);
-                return res.status(500).json({ error: 'Error saving session.' });
-            }
-            console.log('Session saved successfully');
-            console.log('Session ID after save:', req.sessionID);
-            console.log('Set-Cookie header should be set with:', `connect.sid=s%3A${req.sessionID}`);
-            res.json({ role: user.role });
+        console.log('Attempting to save session with ID:', req.sessionID);
+        // Use a Promise to ensure the session save completes
+        await new Promise((resolve, reject) => {
+            req.session.save((err) => {
+                if (err) {
+                    console.error('Error saving session to database:', err.message);
+                    reject(err);
+                } else {
+                    console.log('Session saved successfully to database');
+                    console.log('Session ID after save:', req.sessionID);
+                    console.log('Set-Cookie header should be set with:', `connect.sid=s%3A${req.sessionID}`);
+                    resolve();
+                }
+            });
         });
+        console.log('Session save operation completed');
+        res.json({ role: user.role });
     } catch (err) {
-        console.error('Error logging in:', err);
+        console.error('Error logging in:', err.message);
         res.status(500).json({ error: 'Error logging in.' });
     }
 });
